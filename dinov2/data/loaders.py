@@ -6,6 +6,7 @@
 import logging
 from enum import Enum
 from typing import Any, Callable, List, Optional, TypeVar
+from omegaconf import OmegaConf
 
 import torch
 from torch.utils.data import Sampler
@@ -63,12 +64,48 @@ def _parse_dataset_str(dataset_str: str):
 
     return class_, kwargs
 
+def _parse_slideflow_dataset(
+    args: dict,
+    transform: Optional[Callable] = None,
+    target_transform: Optional[Callable] = None,
+):
+    # Load PyTorch backend of slideflow
+    import os
+    os.environ["SF_BACKEND"] = "torch"
+    import slideflow as sf
+    from slideflow.io.torch import IndexedInterleaver
+
+    logger.info("Using slideflow args: \n{}".format(
+        OmegaConf.to_yaml(args)
+    ))
+
+    # Reconstruct project, dataset, and labels.
+    P = sf.load_project(args.project)
+    dataset = P.dataset(**args.dataset_kwargs)
+    tfrecords = dataset.tfrecords()
+    if args.outcome_labels:
+        labels = dataset.labels(args.outcome_labels)[0]
+    else:
+        labels = None
+
+    torch_dataset = IndexedInterleaver(
+        tfrecords,
+        labels=labels,
+        seed=args.seed,
+        transform=transform,
+        standardize=False,
+        **(args.interleave_kwargs or dict())
+    )
+    return torch_dataset
+
+    # -------------------------------------------------------------------------
 
 def make_dataset(
     *,
     dataset_str: str,
     transform: Optional[Callable] = None,
     target_transform: Optional[Callable] = None,
+    slideflow_args: Optional[dict] = None,
 ):
     """
     Creates a dataset with the specified parameters.
@@ -83,8 +120,11 @@ def make_dataset(
     """
     logger.info(f'using dataset: "{dataset_str}"')
 
-    class_, kwargs = _parse_dataset_str(dataset_str)
-    dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
+    if slideflow_args is not None:
+        dataset = _parse_slideflow_dataset(slideflow_args, transform, target_transform)
+    else:
+        class_, kwargs = _parse_dataset_str(dataset_str)
+        dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
 
     logger.info(f"# of dataset samples: {len(dataset):,d}")
 

@@ -5,6 +5,7 @@
 
 import logging
 
+import torch
 from torchvision import transforms
 
 from .transforms import (
@@ -24,6 +25,7 @@ class DataAugmentationDINO(object):
         local_crops_number,
         global_crops_size=224,
         local_crops_size=96,
+        convert_dtype=False
     ):
         self.global_crops_scale = global_crops_scale
         self.local_crops_scale = local_crops_scale
@@ -82,12 +84,20 @@ class DataAugmentationDINO(object):
         local_transfo_extra = GaussianBlur(p=0.5)
 
         # normalization
-        self.normalize = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                make_normalize_transform(),
-            ]
-        )
+        if convert_dtype:
+            self.normalize = transforms.Compose(
+                [
+                    transforms.ConvertImageDtype(torch.float32),
+                    make_normalize_transform(),
+                ]
+            )
+        else:
+            self.normalize = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    make_normalize_transform(),
+                ]
+            )
 
         self.global_transfo1 = transforms.Compose([color_jittering, global_transfo1_extra, self.normalize])
         self.global_transfo2 = transforms.Compose([color_jittering, global_transfo2_extra, self.normalize])
