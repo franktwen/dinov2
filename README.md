@@ -307,6 +307,28 @@ pip install -r requirements.txt -r requirements-extras.txt
 
 ## Data preparation
 
+### Slideflow
+
+This forked repository supplies tools for training on Slideflow datasets. Modify the configuration YAML file, adding a "slideflow" key and providing dataset details in the following format:
+
+```yaml
+train:
+  dataset_path: slideflow
+  batch_size_per_gpu: 32
+  slideflow:
+    project: "/mnt/data/projects/TCGA_THCA_BRAF"
+    dataset:
+      tile_px: 299
+      tile_um: 302
+      filters:
+        brs_class:
+        - "Braf-like"
+        - "Ras-like"
+    seed: 42
+    outcome_labels: "brs_class"
+    interleave_kwargs: null
+```
+
 ### ImageNet-1k
 
 The root directory of the dataset should hold the following contents:
