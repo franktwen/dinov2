@@ -81,7 +81,11 @@ def _parse_slideflow_dataset(
 
     # Reconstruct project, dataset, and labels.
     P = sf.load_project(args.project)
-    dataset = P.dataset(**args.dataset_kwargs)
+    dataset = P.dataset(
+        tile_px=args.dataset.tile_px,
+        tile_um=args.dataset.tile_um,
+        **(dict() if 'dataset_kwargs' not in args else args.dataset_kwargs)
+    )
     tfrecords = dataset.tfrecords()
     if args.outcome_labels:
         labels = dataset.labels(args.outcome_labels)[0]
