@@ -1,0 +1,19 @@
+# example configuration using a slideflow dataset & stain augmentation
+train:
+  dataset_path: slideflow
+  batch_size_per_gpu: 32
+  slideflow:
+    project: "/mnt/data/projects/TCGA_THCA_BRAF"
+    dataset:
+      tile_px: 299
+      tile_um: 302
+    seed: 42
+    outcome_labels: null
+    interleave_kwargs: null
+    normalizer: "reinhard_mask"
+
+evaluation:
+  eval_period_iterations: 125000
+
+student:
+  block_chunks: 4
