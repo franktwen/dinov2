@@ -13,7 +13,9 @@ from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
 
 from dinov2.data import SamplerType, make_data_loader, make_dataset
-from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator
+from dinov2.data import (
+    collate_data_and_cast, DataAugmentationDINO, DataAugmentationSlideflow,
+    MaskingGenerator)
 import dinov2.distributed as distributed
 from dinov2.fsdp import FSDPCheckpointer
 from dinov2.logging import MetricLogger
@@ -53,6 +55,12 @@ For python-based LazyConfig, use "path.key=value".
         default="",
         type=str,
         help="Output directory to save logs and checkpoints",
+    )
+    parser.add_argument(
+        "--local-rank",
+        default=0,
+        type=int,
+        help="Variable for distributed computing."
     )
 
     return parser
@@ -173,13 +181,26 @@ def do_train(cfg, model, resume=False):
     )
 
     is_slideflow = 'slideflow' in cfg.train
-    data_transform = DataAugmentationDINO(
-        cfg.crops.global_crops_scale,
-        cfg.crops.local_crops_scale,
-        cfg.crops.local_crops_number,
+    aug_kw = dict(
         global_crops_size=cfg.crops.global_crops_size,
         local_crops_size=cfg.crops.local_crops_size,
         convert_dtype=is_slideflow,
+    )
+    if is_slideflow:
+        aug_class = DataAugmentationSlideflow
+        if 'normalizer' in cfg.train.slideflow and cfg.train.slideflow.normalizer:
+            aug_kw['normalizer'] = cfg.train.slideflow.normalizer
+            logger.info("Using slideflow data augmentation with normalizer: {}".format(
+                aug_kw['normalizer']
+            ))
+    else:
+        aug_class = DataAugmentationDINO
+
+    data_transform = aug_class(
+        cfg.crops.global_crops_scale,
+        cfg.crops.local_crops_scale,
+        cfg.crops.local_crops_number,
+        **aug_kw
     )
 
     collate_fn = partial(

@@ -6,6 +6,7 @@
 import logging
 
 import torch
+from typing import Optional
 from torchvision import transforms
 
 from .transforms import (
@@ -126,3 +127,38 @@ class DataAugmentationDINO(object):
         output["offsets"] = ()
 
         return output
+
+# -----------------------------------------------------------------------------
+
+
+class RandomStainAugment:
+    """Transformation to apply random stain augmentation."""
+
+    def __init__(self, normalizer, p=0.5):
+        self.normalizer = normalizer
+        self.p = p
+
+    def __call__(self, img):
+        return torch.where(
+            torch.rand(1)[0] < self.p,
+            self.normalizer.torch_to_torch(img, augment=True),
+            img,
+        )
+
+
+class DataAugmentationSlideflow(DataAugmentationDINO):
+    """DINO data augmentation with random stain augmentation."""
+
+    def __init__(self, *args, normalizer: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if normalizer is not None:
+            import slideflow as sf
+            normalizer = sf.norm.autoselect(normalizer, backend='torch')
+            logger.info("Set up stain augmentation with normalizer: {}".format(normalizer))
+            self.stain_augment = RandomStainAugment(normalizer)
+            self.local_transfo = transforms.Compose(
+                [
+                    self.stain_augment,
+                    self.local_transfo
+                ]
+            )
