@@ -84,7 +84,7 @@ def _parse_slideflow_dataset(
     dataset = P.dataset(
         tile_px=args.dataset.tile_px,
         tile_um=args.dataset.tile_um,
-        **(dict() if 'dataset_kwargs' not in args else args.dataset_kwargs)
+        **(dict() if 'dataset_kwargs' not in args else OmegaConf.to_container(args.dataset_kwargs))
     )
     tfrecords = dataset.tfrecords()
     if args.outcome_labels:
@@ -98,7 +98,7 @@ def _parse_slideflow_dataset(
         seed=args.seed,
         transform=transform,
         standardize=False,
-        **(args.interleave_kwargs or dict())
+        **(OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict())
     )
     return torch_dataset
 
