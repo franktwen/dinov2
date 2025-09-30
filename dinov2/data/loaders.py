@@ -73,7 +73,7 @@ def _parse_slideflow_dataset(
     import os
     os.environ["SF_BACKEND"] = "torch"
     import slideflow as sf
-    from slideflow.io.torch import IndexedInterleaver
+    from slideflow.io.torch import InterleaveIterator
 
     logger.info("Using slideflow args: \n{}".format(
         OmegaConf.to_yaml(args)
@@ -92,17 +92,64 @@ def _parse_slideflow_dataset(
     else:
         labels = None
 
-    torch_dataset = IndexedInterleaver(
+    # Extract and filter interleave_kwargs
+    interleave_kwargs = OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict()
+    
+    # Remove 'seed' if it's in interleave_kwargs (InterleaveIterator doesn't accept it)
+    interleave_kwargs.pop('seed', None)
+    
+    # DON'T pass transform to InterleaveIterator - we'll wrap it
+    torch_dataset = InterleaveIterator(
         tfrecords,
         labels=labels,
-        seed=args.seed,
-        transform=transform,
+        transform=None,  # Changed from transform to None
         standardize=False,
-        **(OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict())
+        **interleave_kwargs
     )
+    
+    # Wrap the dataset to apply transforms correctly
+    if transform is not None:
+        torch_dataset = _wrap_slideflow_dataset(torch_dataset, transform, target_transform)
+    
     return torch_dataset
 
-    # -------------------------------------------------------------------------
+
+def _wrap_slideflow_dataset(dataset, transform, target_transform):
+    """Wrapper to make InterleaveIterator compatible with DINOv2 transforms."""
+    from torch.utils.data import IterableDataset
+    
+    class SlideflowWrapper(IterableDataset):
+        def __init__(self, dataset, transform, target_transform):
+            self.dataset = dataset
+            self.transform = transform
+            self.target_transform = target_transform
+        
+        def __iter__(self):
+            for item in self.dataset:
+                # InterleaveIterator returns tuples: (image, label) or (image, label, ...)
+                if isinstance(item, (tuple, list)):
+                    image = item[0]
+                    label = item[1] if len(item) > 1 else 0
+                # Or it might return dicts
+                elif isinstance(item, dict):
+                    image = item.get('image', item.get('img', None))
+                    label = item.get('label', item.get('target', 0))
+                else:
+                    image = item
+                    label = 0
+                
+                # Apply transforms
+                if self.transform is not None:
+                    image = self.transform(image)
+                if self.target_transform is not None:
+                    label = self.target_transform(label)
+                
+                yield image, label
+        
+        def __len__(self):
+            return len(self.dataset) if hasattr(self.dataset, '__len__') else 0
+    
+    return SlideflowWrapper(dataset, transform, target_transform)
 
 def make_dataset(
     *,
@@ -238,14 +285,21 @@ def make_data_loader(
         collate_fn: Function that performs batch collation
     """
 
-    sampler = _make_sampler(
-        dataset=dataset,
-        type=sampler_type,
-        shuffle=shuffle,
-        seed=seed,
-        size=sampler_size,
-        advance=sampler_advance,
-    )
+    # ADD THIS CHECK:
+    # IterableDatasets handle their own iteration, don't use a sampler
+    from torch.utils.data import IterableDataset
+    if isinstance(dataset, IterableDataset):
+        sampler = None
+        logger.info("dataset is IterableDataset, not using sampler")
+    else:
+        sampler = _make_sampler(
+            dataset=dataset,
+            type=sampler_type,
+            shuffle=shuffle,
+            seed=seed,
+            size=sampler_size,
+            advance=sampler_advance,
+        )
 
     logger.info("using PyTorch data loader")
     data_loader = torch.utils.data.DataLoader(
