@@ -69,25 +69,17 @@ def _parse_slideflow_dataset(
     transform: Optional[Callable] = None,
     target_transform: Optional[Callable] = None,
 ):
+    # Load PyTorch backend of slideflow
     import os
     os.environ["SF_BACKEND"] = "torch"
     import slideflow as sf
-    from slideflow.io.torch import InterleaveIterator
-    import torch.distributed as dist
-    from torch.utils.data import IterableDataset
-    
-    # Check if distributed is initialized
-    if dist.is_initialized():
-        rank = dist.get_rank()
-        num_replicas = dist.get_world_size()
-        logger.info(f"DISTRIBUTED TRAINING DETECTED: rank={rank}, num_replicas={num_replicas}")
-    else:
-        rank = 0
-        num_replicas = 1
-        logger.warning("NO DISTRIBUTED TRAINING CONTEXT - both GPUs will read all data!")
-        
-    logger.info("Using slideflow args: \n{}".format(OmegaConf.to_yaml(args)))
-    
+    from slideflow.io.torch import IndexedInterleaver
+
+    logger.info("Using slideflow args: \n{}".format(
+        OmegaConf.to_yaml(args)
+    ))
+
+    # Reconstruct project, dataset, and labels.
     P = sf.load_project(args.project)
     dataset = P.dataset(
         tile_px=args.dataset.tile_px,
@@ -95,91 +87,22 @@ def _parse_slideflow_dataset(
         **(dict() if 'dataset_kwargs' not in args else OmegaConf.to_container(args.dataset_kwargs))
     )
     tfrecords = dataset.tfrecords()
-    labels = dataset.labels(args.outcome_labels)[0] if args.outcome_labels else None
-    
-    # Get distributed training info
-    if dist.is_initialized():
-        rank = dist.get_rank()
-        num_replicas = dist.get_world_size()
+    if args.outcome_labels:
+        labels = dataset.labels(args.outcome_labels)[0]
     else:
-        rank = 0
-        num_replicas = 1
-    
-    interleave_kwargs = OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict()
-    interleave_kwargs.pop('seed', None)
-    
-    torch_dataset = InterleaveIterator(
+        labels = None
+
+    torch_dataset = IndexedInterleaver(
         tfrecords,
         labels=labels,
-        transform=None,
+        seed=args.seed,
+        transform=transform,
         standardize=False,
-        use_labels=False,
-        rank=rank,              # Are these actually being set?
-        num_replicas=num_replicas,
-        **interleave_kwargs
+        **(OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict())
     )
-    
-    logger.info(f"Dataset created with rank={rank}, num_replicas={num_replicas}, num_tfrecords={len(tfrecords)}")
-    
-    class ApplyTransform(IterableDataset):
-        def __init__(self, dataset, transform):
-            self.dataset = dataset
-            self.transform = transform
-        def __iter__(self):
-            for item in self.dataset:
-                image = item[0]  # Extract image
-                crops = self.transform(image)  # Get transformed dict
-                yield (crops, 0)  # Wrap as tuple with dummy label
-        def __len__(self):
-            return len(self.dataset)
+    return torch_dataset
 
-    return ApplyTransform(torch_dataset, transform)
-
-
-def _wrap_slideflow_dataset(dataset, transform, target_transform):
-    from torch.utils.data import IterableDataset
-    import gc
-    
-    class SlideflowWrapper(IterableDataset):
-        def __init__(self, dataset, transform, target_transform):
-            self.dataset = dataset
-            self.transform = transform
-            self.target_transform = target_transform
-            self._count = 0
-        
-        def __iter__(self):
-            for item in self.dataset:
-                self._count += 1
-                
-                # Extract image/label
-                if isinstance(item, (tuple, list)):
-                    image = item[0]
-                    label = item[1] if len(item) > 1 else 0
-                elif isinstance(item, dict):
-                    image = item.get('image', item.get('img', None))
-                    label = item.get('label', item.get('target', 0))
-                else:
-                    image = item
-                    label = 0
-                
-                # Apply transforms
-                if self.transform is not None:
-                    image = self.transform(image)
-                if self.target_transform is not None:
-                    label = self.target_transform(label)
-                
-                yield image, label
-                
-                # Periodic garbage collection
-                if self._count % 100 == 0:
-                    gc.collect()
-        
-        def __len__(self):
-            if hasattr(self.dataset, 'infinite') and self.dataset.infinite:
-                return 10**9
-            return len(self.dataset) if hasattr(self.dataset, '__len__') else 0
-    
-    return SlideflowWrapper(dataset, transform, target_transform)
+    # -------------------------------------------------------------------------
 
 def make_dataset(
     *,
@@ -315,21 +238,14 @@ def make_data_loader(
         collate_fn: Function that performs batch collation
     """
 
-    # ADD THIS CHECK:
-    # IterableDatasets handle their own iteration, don't use a sampler
-    from torch.utils.data import IterableDataset
-    if isinstance(dataset, IterableDataset):
-        sampler = None
-        logger.info("dataset is IterableDataset, not using sampler")
-    else:
-        sampler = _make_sampler(
-            dataset=dataset,
-            type=sampler_type,
-            shuffle=shuffle,
-            seed=seed,
-            size=sampler_size,
-            advance=sampler_advance,
-        )
+    sampler = _make_sampler(
+        dataset=dataset,
+        type=sampler_type,
+        shuffle=shuffle,
+        seed=seed,
+        size=sampler_size,
+        advance=sampler_advance,
+    )
 
     logger.info("using PyTorch data loader")
     data_loader = torch.utils.data.DataLoader(
