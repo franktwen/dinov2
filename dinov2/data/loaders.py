@@ -64,45 +64,92 @@ def _parse_dataset_str(dataset_str: str):
 
     return class_, kwargs
 
+# In dinov2/data/loaders.py
+
 def _parse_slideflow_dataset(
     args: dict,
     transform: Optional[Callable] = None,
     target_transform: Optional[Callable] = None,
 ):
-    # Load PyTorch backend of slideflow
     import os
     os.environ["SF_BACKEND"] = "torch"
     import slideflow as sf
     from slideflow.io.torch import IndexedInterleaver
+    import torch.distributed as dist
+    import time
+    import hashlib # For hashing
+
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        num_replicas = dist.get_world_size()
+    else:
+        rank = 0
+        num_replicas = 1
 
     logger.info("Using slideflow args: \n{}".format(
         OmegaConf.to_yaml(args)
     ))
 
-    # Reconstruct project, dataset, and labels.
+    # --- START OF AUTOMATED CACHING LOGIC ---
+
+    # Step 1: Get the list of TFRecord files first. This is determined by your filters.
     P = sf.load_project(args.project)
-    dataset = P.dataset(
+    dataset_obj = P.dataset(
         tile_px=args.dataset.tile_px,
         tile_um=args.dataset.tile_um,
         **(dict() if 'dataset_kwargs' not in args else OmegaConf.to_container(args.dataset_kwargs))
     )
-    tfrecords = dataset.tfrecords()
-    if args.outcome_labels:
-        labels = dataset.labels(args.outcome_labels)[0]
+    tfrecords = dataset_obj.tfrecords()
+
+    # Step 2: Create a unique hash from the list of files.
+    # This ensures if the filters change (and thus the tfrecords list changes), a new cache is made.
+    tfrecord_string = "".join(sorted(tfrecords))
+    config_hash = hashlib.md5(tfrecord_string.encode()).hexdigest()[:10] # A 10-char hash is enough
+
+    # Step 3: Define the cache path using this unique hash.
+    cache_filename = f'cached_indices_{config_hash}_rank_{rank}.pt'
+    cache_path = os.path.join(args.project, cache_filename)
+
+    if os.path.exists(cache_path):
+        logger.info(f"[Rank {rank}] Found VALID cached index ({cache_filename}). Loading...")
+        start_time = time.time()
+        cached_data = torch.load(cache_path)
+        labels = cached_data['labels']
+        indices = cached_data['indices']
+        logger.info(f"[Rank {rank}] Loaded cached index in {time.time() - start_time:.2f} seconds.")
     else:
-        labels = None
+        logger.info(f"[Rank {rank}] No valid cache found for this config. Building from scratch...")
+        start_time = time.time()
+        if args.outcome_labels:
+            labels = dataset_obj.labels(args.outcome_labels)[0]
+        else:
+            labels = None
+
+        logger.info(f"[Rank {rank}] Calling IndexedInterleaver to build index...")
+        temp_dataset = IndexedInterleaver(tfrecords, rank=rank, num_replicas=num_replicas)
+        indices = temp_dataset.indices
+
+        logger.info(f"[Rank {rank}] Saving index to new cache file: {cache_filename}")
+        torch.save({'labels': labels, 'indices': indices}, cache_path)
+        logger.info(f"[Rank {rank}] Index built and cached in {time.time() - start_time:.2f} seconds.")
+
+    if dist.is_initialized():
+        dist.barrier()
+    # --- END OF AUTOMATED CACHING LOGIC ---
+
+    interleave_kwargs = OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict()
 
     torch_dataset = IndexedInterleaver(
         tfrecords,
+        indices=indices,
         labels=labels,
-        seed=args.seed,
         transform=transform,
         standardize=False,
-        **(OmegaConf.to_container(args.interleave_kwargs) if args.interleave_kwargs else dict())
+        rank=rank,
+        num_replicas=num_replicas,
+        **interleave_kwargs
     )
     return torch_dataset
-
-    # -------------------------------------------------------------------------
 
 def make_dataset(
     *,
