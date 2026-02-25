@@ -180,11 +180,12 @@ def do_train(cfg, model, resume=False):
         max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
     )
 
-    is_slideflow = 'slideflow' in cfg.train
+    is_webdataset = cfg.train.dataset_path == "webdataset"
+    is_slideflow = 'slideflow' in cfg.train and not is_webdataset
     aug_kw = dict(
         global_crops_size=cfg.crops.global_crops_size,
         local_crops_size=cfg.crops.local_crops_size,
-        convert_dtype=is_slideflow,
+        convert_dtype=is_slideflow,  # False for webdataset (PIL images)
     )
     if is_slideflow:
         aug_class = DataAugmentationSlideflow
@@ -214,14 +215,21 @@ def do_train(cfg, model, resume=False):
 
     # setup data loader
 
-    dataset = make_dataset(
-        dataset_str=cfg.train.dataset_path,
-        transform=data_transform,
-        target_transform=lambda _: (),
-        slideflow_args=(None if 'slideflow' not in cfg.train else cfg.train.slideflow)
-    )
+    if is_webdataset:
+        from dinov2.data.wds_loader import make_webdataset
+        dataset = make_webdataset(
+            cfg_train=cfg.train,
+            image_transform=data_transform,
+        )
+    else:
+        dataset = make_dataset(
+            dataset_str=cfg.train.dataset_path,
+            transform=data_transform,
+            target_transform=lambda _: (),
+            slideflow_args=(None if 'slideflow' not in cfg.train else cfg.train.slideflow)
+        )
     # sampler_type = SamplerType.INFINITE
-    sampler_type = SamplerType.SHARDED_INFINITE
+    sampler_type = None if is_webdataset else SamplerType.SHARDED_INFINITE
     data_loader = make_data_loader(
         dataset=dataset,
         batch_size=cfg.train.batch_size_per_gpu,

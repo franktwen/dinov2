@@ -254,7 +254,7 @@ class NestedTensorBlock(Block):
             return super().forward(x_or_x_list)
         elif isinstance(x_or_x_list, list):
             if not XFORMERS_AVAILABLE:
-                raise AssertionError("xFormers is required for using nested tensors")
+                return [super(NestedTensorBlock, self).forward(x) for x in x_or_x_list]
             return self.forward_nested(x_or_x_list)
         else:
             raise AssertionError
